@@ -1,0 +1,8 @@
+language: go
+go:
+  -1.16.x
+
+script:
+  - make grpc-compile
+  - cd sorting-service
+  - make go-test
