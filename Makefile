@@ -1,3 +1,3 @@
 GOSERVICE := root
 
-include ./Makefile
+include ./Makefile.GRPC
