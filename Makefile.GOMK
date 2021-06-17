@@ -14,4 +14,4 @@ go-test:
 	SERVICE_ENV=test GOPROXY=${GOPROXY} go test -cover -v -race ./...
 
 go-run:
-	SERVICE_ENV=development GOPROXY=${GOPROXY} SERVICE_LOG=debug go run *.go
+	SERVICE_ENV=development GOPROXY=${GOPROXY} SERVICE_LOG=debug go run .
