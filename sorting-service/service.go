@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/PavelTsvetanov/sort-system/gen"
@@ -14,6 +15,7 @@ func newSortingService() gen.SortingRobotServer {
 }
 
 type sortingService struct {
+	mutex        sync.Mutex
 	items        []*gen.Item
 	selectedItem *gen.Item
 }
@@ -32,6 +34,9 @@ func (s *sortingService) MoveItem(context.Context, *gen.MoveItemRequest) (*gen.M
 }
 
 func (s *sortingService) SelectItemImpl(ctx context.Context, req *gen.SelectItemRequest, seed int64) (*gen.SelectItemResponse, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.selectedItem != nil {
 		return nil, errors.New("an item is already selected")
 	}
@@ -42,6 +47,7 @@ func (s *sortingService) SelectItemImpl(ctx context.Context, req *gen.SelectItem
 	idx := rand.Intn(len(s.items))
 	s.selectedItem = s.items[idx]
 	s.items = append(s.items[:idx], s.items[idx+1:]...)
+
 	return &gen.SelectItemResponse{Item: s.selectedItem}, nil
 }
 
