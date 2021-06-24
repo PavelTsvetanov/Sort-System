@@ -3,6 +3,8 @@ syntax = "proto3";
 package types;
 option go_package = "github.com/PavelTsvetanov/sort-system/gen";
 
+message Empty {}
+
 message Item {
   string code = 1;
   string label = 2;

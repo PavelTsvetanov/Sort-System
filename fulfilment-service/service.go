@@ -5,53 +5,78 @@ import (
 	"errors"
 	"github.com/PavelTsvetanov/sort-system/gen"
 	"github.com/preslavmihaylov/ordertocubby"
-	"google.golang.org/grpc"
 	"log"
+	"math"
+	"sync"
 )
 
-func newFulfilmentService() gen.FulfillmentServer {
-	return &fulfilmentService{}
+func newFulfilmentService(sortingRobot gen.SortingRobotClient) gen.FulfillmentServer {
+	f := &fulfilmentService{sortingRobot: sortingRobot}
+	f.orderRequests = scheduleRequests(f.processRequest)
+	return f
 }
 
 const (
-	nrOfCubbies          = 10
+	nrOfCubbies          = math.MaxInt32
 	sortingServerAddress = "localhost:10000"
 )
 
 type fulfilmentService struct {
+	sortingRobot  gen.SortingRobotClient
+	oMap          sync.Map
+	orderRequests chan *gen.LoadOrdersRequest
+}
+
+func scheduleRequests(processRequest func(request *gen.LoadOrdersRequest)) chan *gen.LoadOrdersRequest {
+	requests := make(chan *gen.LoadOrdersRequest)
+	go func() {
+		log.Printf("Processing requests...")
+		for {
+			processRequest(<-requests)
+		}
+	}()
+	return requests
+}
+
+func (s *fulfilmentService) GetOrderStatusById(ctx context.Context, request *gen.OrderIdRequest) (*gen.OrdersStatusResponse, error) {
+	panic("implement me")
+}
+
+func (s *fulfilmentService) GetAllOrdersStatus(ctx context.Context, empty *gen.Empty) (*gen.OrdersStatusResponse, error) {
+	panic("implement me")
+}
+
+func (s *fulfilmentService) MarkFulfilled(ctx context.Context, request *gen.OrderIdRequest) (*gen.Empty, error) {
+	panic("implement me")
 }
 
 func (s *fulfilmentService) LoadOrders(ctx context.Context, request *gen.LoadOrdersRequest) (*gen.CompleteResponse, error) {
-	//move
-	var opts []grpc.DialOption
-	opts = append(opts, grpc.WithInsecure())
-	conn, err := grpc.Dial(sortingServerAddress, opts...)
-	if err != nil {
-		log.Fatalf("Failed ot dial sorting robot server: %s", err)
-	}
-	defer conn.Close()
+	go func() {
+		s.orderRequests <- request
+	}()
 
-	sortingService := gen.NewSortingRobotClient(conn)
-	orderToCubby := mapOrdersToCubbies(request.Orders)
-	itemToCubby := mapItemToCubby(request.Orders, orderToCubby)
+	return &gen.CompleteResponse{Message: []string{}}, nil
+}
 
+func (s *fulfilmentService) processRequest(request *gen.LoadOrdersRequest) {
+	oToCubbies := mapOrdersToCubbies(request.Orders)
+	itemToCubbies := s.mapItemToCubby(request.Orders, oToCubbies)
 	for _, order := range request.Orders {
 		for range order.Items {
-			resp, err := sortingService.SelectItem(ctx, &gen.SelectItemRequest{})
+			resp, err := s.sortingRobot.SelectItem(context.Background(), &gen.SelectItemRequest{})
 			if err != nil {
 				log.Fatalf("Robot failed to select an item: %s", err)
 			}
-			c, err := getCubbyForItem(resp.Item, itemToCubby)
+			c, err := s.getCubbyForItem(resp.Item, itemToCubbies)
 			if err != nil {
 				log.Fatal(err)
 			}
-			_, err = sortingService.MoveItem(ctx, &gen.MoveItemRequest{Cubby: &gen.Cubby{Id: c}})
+			_, err = s.sortingRobot.MoveItem(context.Background(), &gen.MoveItemRequest{Cubby: &gen.Cubby{Id: c}})
 			if err != nil {
 				log.Fatalf("Robot failed to move an item: %s", err)
 			}
 		}
 	}
-	return mapToCompleteResponse(orderToCubby), nil
 }
 
 func getFreeCubby(orderId string, usedCubbies map[string]bool) string {
@@ -65,15 +90,6 @@ func getFreeCubby(orderId string, usedCubbies map[string]bool) string {
 	}
 }
 
-func mapToCompleteResponse(orderToCubby map[string]string) *gen.CompleteResponse {
-	var resp = gen.CompleteResponse{}
-	for order, cubby := range orderToCubby {
-		orderResp := gen.PreparedOrder{Order: &gen.Order{Id: order}, Cubby: &gen.Cubby{Id: cubby}}
-		resp.Orders = append(resp.Orders, &orderResp)
-	}
-	return &resp
-}
-
 func mapOrdersToCubbies(orders []*gen.Order) map[string]string {
 	m := make(map[string]string)
 	used := make(map[string]bool)
@@ -85,7 +101,7 @@ func mapOrdersToCubbies(orders []*gen.Order) map[string]string {
 	return m
 }
 
-func mapItemToCubby(orders []*gen.Order, oToCubby map[string]string) map[string][]string {
+func (s *fulfilmentService) mapItemToCubby(orders []*gen.Order, oToCubby map[string]string) map[string][]string {
 	m := make(map[string][]string)
 	for _, order := range orders {
 		cubby := oToCubby[order.Id]
@@ -96,11 +112,11 @@ func mapItemToCubby(orders []*gen.Order, oToCubby map[string]string) map[string]
 	return m
 }
 
-func getCubbyForItem(item *gen.Item, orders map[string][]string) (string, error) {
-	if cubbies, ok := orders[item.Code]; ok {
+func (s *fulfilmentService) getCubbyForItem(item *gen.Item, itemToCubby map[string][]string) (string, error) {
+	if cubbies, ok := itemToCubby[item.Code]; ok {
 		if len(cubbies) != 0 {
 			var cubby string
-			cubby, orders[item.Code] = orders[item.Code][0], orders[item.Code][1:]
+			cubby, itemToCubby[item.Code] = itemToCubby[item.Code][0], itemToCubby[item.Code][1:]
 			return cubby, nil
 		}
 		return "", errors.New("no available cubbies left")
