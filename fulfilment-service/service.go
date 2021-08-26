@@ -11,7 +11,10 @@ import (
 )
 
 func newFulfilmentService(sortingRobot gen.SortingRobotClient) gen.FulfillmentServer {
-	f := &fulfilmentService{sortingRobot: sortingRobot, orderStatus: map[string]*gen.FulfilmentStatus{}}
+	f := &fulfilmentService{
+		sortingRobot: sortingRobot,
+		orderStatus:  map[string]*gen.FulfilmentStatus{},
+		itemToCubby:  map[string][]string{}}
 	f.orderRequests = scheduleRequests(f.processRequest)
 	return f
 }
@@ -22,11 +25,12 @@ const (
 )
 
 type fulfilmentService struct {
-	sortingRobot  gen.SortingRobotClient
-	oMap          sync.Map
-	orderStatus   map[string]*gen.FulfilmentStatus
-	mutex         sync.Mutex
-	orderRequests chan *gen.LoadOrdersRequest
+	sortingRobot     gen.SortingRobotClient
+	itemToCubby      map[string][]string
+	orderStatus      map[string]*gen.FulfilmentStatus
+	orderStatusMutex sync.Mutex
+	itemToCubbyMutex sync.Mutex
+	orderRequests    chan *gen.LoadOrdersRequest
 }
 
 func scheduleRequests(processRequest func(request *gen.LoadOrdersRequest)) chan *gen.LoadOrdersRequest {
@@ -41,14 +45,14 @@ func scheduleRequests(processRequest func(request *gen.LoadOrdersRequest)) chan 
 }
 
 func (s *fulfilmentService) GetOrderStatusById(ctx context.Context, request *gen.OrderIdRequest) (*gen.OrdersStatusResponse, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+	s.orderStatusMutex.Lock()
+	defer s.orderStatusMutex.Unlock()
 	return &gen.OrdersStatusResponse{Status: []*gen.FulfilmentStatus{s.orderStatus[request.OrderId]}}, nil
 }
 
 func (s *fulfilmentService) GetAllOrdersStatus(ctx context.Context, empty *gen.Empty) (*gen.OrdersStatusResponse, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+	s.orderStatusMutex.Lock()
+	defer s.orderStatusMutex.Unlock()
 	orders := &gen.OrdersStatusResponse{Status: []*gen.FulfilmentStatus{}}
 	for _, orderStatus := range s.orderStatus {
 		orders.Status = append(orders.Status, orderStatus)
@@ -62,7 +66,7 @@ func (s *fulfilmentService) MarkFulfilled(ctx context.Context, request *gen.Orde
 
 func (s *fulfilmentService) LoadOrders(ctx context.Context, request *gen.LoadOrdersRequest) (*gen.CompleteResponse, error) {
 	go func() {
-		s.mutex.Lock()
+		s.orderStatusMutex.Lock()
 		for _, order := range request.Orders {
 			s.orderStatus[order.Id] = &gen.FulfilmentStatus{
 				Order: order,
@@ -70,7 +74,7 @@ func (s *fulfilmentService) LoadOrders(ctx context.Context, request *gen.LoadOrd
 				State: gen.OrderState_PENDING,
 			}
 		}
-		s.mutex.Unlock()
+		s.orderStatusMutex.Unlock()
 		s.orderRequests <- request
 	}()
 
@@ -79,17 +83,17 @@ func (s *fulfilmentService) LoadOrders(ctx context.Context, request *gen.LoadOrd
 
 func (s *fulfilmentService) processRequest(request *gen.LoadOrdersRequest) {
 	oToCubbies := mapOrdersToCubbies(request.Orders)
-	itemToCubbies := s.mapItemToCubby(request.Orders, oToCubbies)
+	s.mapItemToCubby(request.Orders)
 	for _, order := range request.Orders {
-		s.mutex.Lock()
+		s.orderStatusMutex.Lock()
 		s.orderStatus[order.Id].Cubby = &gen.Cubby{Id: oToCubbies[order.Id]}
-		s.mutex.Unlock()
+		s.orderStatusMutex.Unlock()
 		for range order.Items {
 			resp, err := s.sortingRobot.SelectItem(context.Background(), &gen.SelectItemRequest{})
 			if err != nil {
 				log.Fatalf("Robot failed to select an item: %s", err)
 			}
-			c, err := s.getCubbyForItem(resp.Item, itemToCubbies)
+			c, err := s.getCubbyForItem(resp.Item)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -123,22 +127,26 @@ func mapOrdersToCubbies(orders []*gen.Order) map[string]string {
 	return m
 }
 
-func (s *fulfilmentService) mapItemToCubby(orders []*gen.Order, oToCubby map[string]string) map[string][]string {
-	m := make(map[string][]string)
+func (s *fulfilmentService) mapItemToCubby(orders []*gen.Order) {
 	for _, order := range orders {
-		cubby := oToCubby[order.Id]
+		s.orderStatusMutex.Lock()
+		s.orderStatusMutex.Unlock()
+		cubby := s.orderStatus[order.Id].Cubby.Id
 		for _, item := range order.Items {
-			m[item.Code] = append(m[item.Code], cubby)
+			s.itemToCubbyMutex.Lock()
+			s.itemToCubbyMutex.Unlock()
+			s.itemToCubby[item.Code] = append(s.itemToCubby[item.Code], cubby)
 		}
 	}
-	return m
 }
 
-func (s *fulfilmentService) getCubbyForItem(item *gen.Item, itemToCubby map[string][]string) (string, error) {
-	if cubbies, ok := itemToCubby[item.Code]; ok {
+func (s *fulfilmentService) getCubbyForItem(item *gen.Item) (string, error) {
+	s.itemToCubbyMutex.Lock()
+	s.itemToCubbyMutex.Unlock()
+	if cubbies, ok := s.itemToCubby[item.Code]; ok {
 		if len(cubbies) != 0 {
 			var cubby string
-			cubby, itemToCubby[item.Code] = itemToCubby[item.Code][0], itemToCubby[item.Code][1:]
+			cubby, s.itemToCubby[item.Code] = s.itemToCubby[item.Code][0], s.itemToCubby[item.Code][1:]
 			return cubby, nil
 		}
 		return "", errors.New("no available cubbies left")
