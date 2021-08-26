@@ -93,7 +93,7 @@ func (s *fulfilmentService) processRequest(request *gen.LoadOrdersRequest) {
 			if err != nil {
 				log.Fatalf("Robot failed to select an item: %s", err)
 			}
-			c, err := s.getCubbyForItem(resp.Item)
+			c, err := s.popNextCubbyForItem(resp.Item)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -121,7 +121,7 @@ func mapOrdersToCubbies(orders []*gen.Order) map[string]string {
 	used := make(map[string]bool)
 	for _, order := range orders {
 		cubby := getFreeCubby(order.Id, used)
-		used[order.Id] = true
+		used[cubby] = true
 		m[order.Id] = cubby
 	}
 	return m
@@ -140,7 +140,7 @@ func (s *fulfilmentService) mapItemToCubby(orders []*gen.Order) {
 	}
 }
 
-func (s *fulfilmentService) getCubbyForItem(item *gen.Item) (string, error) {
+func (s *fulfilmentService) popNextCubbyForItem(item *gen.Item) (string, error) {
 	s.itemToCubbyMutex.Lock()
 	s.itemToCubbyMutex.Unlock()
 	if cubbies, ok := s.itemToCubby[item.Code]; ok {
