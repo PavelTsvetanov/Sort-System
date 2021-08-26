@@ -11,7 +11,7 @@ import (
 )
 
 func newFulfilmentService(sortingRobot gen.SortingRobotClient) gen.FulfillmentServer {
-	f := &fulfilmentService{sortingRobot: sortingRobot}
+	f := &fulfilmentService{sortingRobot: sortingRobot, orderStatus: map[string]*gen.FulfilmentStatus{}}
 	f.orderRequests = scheduleRequests(f.processRequest)
 	return f
 }
@@ -24,6 +24,8 @@ const (
 type fulfilmentService struct {
 	sortingRobot  gen.SortingRobotClient
 	oMap          sync.Map
+	orderStatus   map[string]*gen.FulfilmentStatus
+	mutex         sync.Mutex
 	orderRequests chan *gen.LoadOrdersRequest
 }
 
@@ -39,11 +41,19 @@ func scheduleRequests(processRequest func(request *gen.LoadOrdersRequest)) chan 
 }
 
 func (s *fulfilmentService) GetOrderStatusById(ctx context.Context, request *gen.OrderIdRequest) (*gen.OrdersStatusResponse, error) {
-	panic("implement me")
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return &gen.OrdersStatusResponse{Status: []*gen.FulfilmentStatus{s.orderStatus[request.OrderId]}}, nil
 }
 
 func (s *fulfilmentService) GetAllOrdersStatus(ctx context.Context, empty *gen.Empty) (*gen.OrdersStatusResponse, error) {
-	panic("implement me")
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	orders := &gen.OrdersStatusResponse{Status: []*gen.FulfilmentStatus{}}
+	for _, orderStatus := range s.orderStatus {
+		orders.Status = append(orders.Status, orderStatus)
+	}
+	return orders, nil
 }
 
 func (s *fulfilmentService) MarkFulfilled(ctx context.Context, request *gen.OrderIdRequest) (*gen.Empty, error) {
@@ -52,6 +62,15 @@ func (s *fulfilmentService) MarkFulfilled(ctx context.Context, request *gen.Orde
 
 func (s *fulfilmentService) LoadOrders(ctx context.Context, request *gen.LoadOrdersRequest) (*gen.CompleteResponse, error) {
 	go func() {
+		s.mutex.Lock()
+		for _, order := range request.Orders {
+			s.orderStatus[order.Id] = &gen.FulfilmentStatus{
+				Order: order,
+				Cubby: &gen.Cubby{},
+				State: gen.OrderState_PENDING,
+			}
+		}
+		s.mutex.Unlock()
 		s.orderRequests <- request
 	}()
 
@@ -62,6 +81,9 @@ func (s *fulfilmentService) processRequest(request *gen.LoadOrdersRequest) {
 	oToCubbies := mapOrdersToCubbies(request.Orders)
 	itemToCubbies := s.mapItemToCubby(request.Orders, oToCubbies)
 	for _, order := range request.Orders {
+		s.mutex.Lock()
+		s.orderStatus[order.Id].Cubby = &gen.Cubby{Id: oToCubbies[order.Id]}
+		s.mutex.Unlock()
 		for range order.Items {
 			resp, err := s.sortingRobot.SelectItem(context.Background(), &gen.SelectItemRequest{})
 			if err != nil {
