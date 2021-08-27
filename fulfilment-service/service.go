@@ -12,10 +12,12 @@ import (
 
 func newFulfilmentService(sortingRobot gen.SortingRobotClient) gen.FulfillmentServer {
 	f := &fulfilmentService{
-		sortingRobot: sortingRobot,
-		orderStatus:  orderToStatus{mapper: map[string]*gen.FulfilmentStatus{}},
-		itemToCubby:  itemToCubby{mapper: map[string][]string{}}}
+		activeOrders:        activeOrder{mapper: map[string]map[string]bool{}},
+		sortingRobot:        sortingRobot,
+		orderStatus:         orderToStatus{mapper: map[string]*gen.FulfilmentStatus{}},
+		itemToPreparedOrder: itemToCubby{mapper: map[string][]*gen.PreparedOrder{}}}
 	f.orderRequests = scheduleRequests(f.processRequest)
+	f.orderItemCompleted = checkIfOrderIsCompleted(f.changeOrderStatusIfComplete)
 	return f
 }
 
@@ -26,7 +28,7 @@ const (
 
 type itemToCubby struct {
 	sync.Mutex
-	mapper map[string][]string
+	mapper map[string][]*gen.PreparedOrder
 }
 
 type orderToStatus struct {
@@ -34,11 +36,18 @@ type orderToStatus struct {
 	mapper map[string]*gen.FulfilmentStatus
 }
 
+type activeOrder struct {
+	sync.Mutex
+	mapper map[string]map[string]bool
+}
+
 type fulfilmentService struct {
-	sortingRobot  gen.SortingRobotClient
-	itemToCubby   itemToCubby
-	orderStatus   orderToStatus
-	orderRequests chan *gen.LoadOrdersRequest
+	sortingRobot        gen.SortingRobotClient
+	itemToPreparedOrder itemToCubby
+	orderStatus         orderToStatus
+	orderRequests       chan *gen.LoadOrdersRequest
+	orderItemCompleted  chan string
+	activeOrders        activeOrder
 }
 
 func scheduleRequests(processRequest func(request *gen.LoadOrdersRequest)) chan *gen.LoadOrdersRequest {
@@ -50,6 +59,34 @@ func scheduleRequests(processRequest func(request *gen.LoadOrdersRequest)) chan 
 		}
 	}()
 	return requests
+}
+
+func checkIfOrderIsCompleted(changeOrderStatus func(orderId string)) chan string {
+	newItemPushed := make(chan string)
+	go func() {
+		for {
+			changeOrderStatus(<-newItemPushed)
+		}
+	}()
+	return newItemPushed
+}
+
+func (s *fulfilmentService) changeOrderStatusIfComplete(orderId string) {
+	allItemsAreInCubby := true
+	s.activeOrders.Lock()
+	defer s.activeOrders.Unlock()
+	for _, isInCubby := range s.activeOrders.mapper[orderId] {
+		if !isInCubby {
+			allItemsAreInCubby = false
+			break
+		}
+	}
+	if allItemsAreInCubby {
+		delete(s.activeOrders.mapper, orderId)
+		s.orderStatus.Lock()
+		defer s.orderStatus.Unlock()
+		s.orderStatus.mapper[orderId].State = gen.OrderState_READY
+	}
 }
 
 func (s *fulfilmentService) GetOrderStatusById(ctx context.Context, request *gen.OrderIdRequest) (*gen.OrdersStatusResponse, error) {
@@ -81,6 +118,14 @@ func (s *fulfilmentService) LoadOrders(ctx context.Context, request *gen.LoadOrd
 				Cubby: &gen.Cubby{},
 				State: gen.OrderState_PENDING,
 			}
+			s.activeOrders.Lock()
+			for _, item := range order.Items {
+				if _, exists := s.activeOrders.mapper[order.Id]; !exists {
+					s.activeOrders.mapper[order.Id] = make(map[string]bool)
+				}
+				s.activeOrders.mapper[order.Id][item.Code] = false
+			}
+			s.activeOrders.Unlock()
 		}
 		s.orderStatus.Unlock()
 		s.orderRequests <- request
@@ -91,7 +136,7 @@ func (s *fulfilmentService) LoadOrders(ctx context.Context, request *gen.LoadOrd
 
 func (s *fulfilmentService) processRequest(request *gen.LoadOrdersRequest) {
 	oToCubbies := mapOrdersToCubbies(request.Orders)
-	s.mapItemToCubby(request.Orders)
+	s.mapItemToPreparedOrder(request.Orders)
 	for _, order := range request.Orders {
 		s.orderStatus.Lock()
 		s.orderStatus.mapper[order.Id].Cubby = &gen.Cubby{Id: oToCubbies[order.Id]}
@@ -101,14 +146,21 @@ func (s *fulfilmentService) processRequest(request *gen.LoadOrdersRequest) {
 			if err != nil {
 				log.Fatalf("Robot failed to select an item: %s", err)
 			}
-			c, err := s.popNextCubbyForItem(resp.Item)
+			preparedOrder, err := s.popNextPreparedOrderForItem(resp.Item)
 			if err != nil {
 				log.Fatal(err)
 			}
-			_, err = s.sortingRobot.MoveItem(context.Background(), &gen.MoveItemRequest{Cubby: &gen.Cubby{Id: c}})
+			_, err = s.sortingRobot.MoveItem(
+				context.Background(),
+				&gen.MoveItemRequest{Cubby: &gen.Cubby{Id: preparedOrder.Cubby.Id}},
+			)
 			if err != nil {
 				log.Fatalf("Robot failed to move an item: %s", err)
 			}
+			s.activeOrders.Lock()
+			s.activeOrders.mapper[preparedOrder.Order.Id][resp.Item.Code] = true
+			s.activeOrders.Unlock()
+			s.orderItemCompleted <- preparedOrder.Order.Id
 		}
 	}
 }
@@ -135,29 +187,35 @@ func mapOrdersToCubbies(orders []*gen.Order) map[string]string {
 	return m
 }
 
-func (s *fulfilmentService) mapItemToCubby(orders []*gen.Order) {
+func (s *fulfilmentService) mapItemToPreparedOrder(orders []*gen.Order) {
 	for _, order := range orders {
 		s.orderStatus.Lock()
 		cubby := s.orderStatus.mapper[order.Id].Cubby.Id
 		s.orderStatus.Unlock()
 		for _, item := range order.Items {
-			s.itemToCubby.Lock()
-			s.itemToCubby.mapper[item.Code] = append(s.itemToCubby.mapper[item.Code], cubby)
-			s.itemToCubby.Unlock()
+			s.itemToPreparedOrder.Lock()
+			s.itemToPreparedOrder.mapper[item.Code] = append(
+				s.itemToPreparedOrder.mapper[item.Code],
+				&gen.PreparedOrder{
+					Order: order,
+					Cubby: &gen.Cubby{Id: cubby},
+				},
+			)
+			s.itemToPreparedOrder.Unlock()
 		}
 	}
 }
 
-func (s *fulfilmentService) popNextCubbyForItem(item *gen.Item) (string, error) {
-	s.itemToCubby.Lock()
-	defer s.itemToCubby.Unlock()
-	if cubbies, ok := s.itemToCubby.mapper[item.Code]; ok {
+func (s *fulfilmentService) popNextPreparedOrderForItem(item *gen.Item) (*gen.PreparedOrder, error) {
+	s.itemToPreparedOrder.Lock()
+	defer s.itemToPreparedOrder.Unlock()
+	if cubbies, ok := s.itemToPreparedOrder.mapper[item.Code]; ok {
 		if len(cubbies) != 0 {
-			var cubby string
-			cubby, s.itemToCubby.mapper[item.Code] = s.itemToCubby.mapper[item.Code][0], s.itemToCubby.mapper[item.Code][1:]
+			var cubby *gen.PreparedOrder
+			cubby, s.itemToPreparedOrder.mapper[item.Code] = s.itemToPreparedOrder.mapper[item.Code][0], s.itemToPreparedOrder.mapper[item.Code][1:]
 			return cubby, nil
 		}
-		return "", errors.New("no available cubbies left")
+		return nil, errors.New("no available cubbies left")
 	}
-	return "", errors.New("todo")
+	return nil, errors.New("no order was placed for item: " + item.Code)
 }
