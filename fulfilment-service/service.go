@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/PavelTsvetanov/sort-system/gen"
 	"github.com/preslavmihaylov/ordertocubby"
 	"log"
@@ -92,6 +93,9 @@ func (s *fulfilmentService) changeOrderStatusIfComplete(orderId string) {
 func (s *fulfilmentService) GetOrderStatusById(ctx context.Context, request *gen.OrderIdRequest) (*gen.OrdersStatusResponse, error) {
 	s.orderStatus.Lock()
 	defer s.orderStatus.Unlock()
+	if _, exists := s.orderStatus.mapper[request.OrderId]; !exists {
+		return nil, fmt.Errorf("order with id:%s does not exist", request.OrderId)
+	}
 	return &gen.OrdersStatusResponse{Status: []*gen.FulfilmentStatus{s.orderStatus.mapper[request.OrderId]}}, nil
 }
 
