@@ -32,7 +32,7 @@ func TestSelectItemWhenNoLoadedItems(t *testing.T) {
 	s := newSortingService()
 	resp, err := s.SelectItem(context.Background(), &gen.SelectItemRequest{})
 	assert.Nil(t, resp)
-	expectedErrorMsg := "sorting robot has no items loaded"
+	expectedErrorMsg := "no items loaded"
 	assert.EqualError(t, err, expectedErrorMsg)
 }
 
