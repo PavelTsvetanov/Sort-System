@@ -1,5 +1,5 @@
 # sort-system
-[![Build Status](https://travis-ci.com/PavelTsvetanov/sort-system.svg?branch=main)](https://travis-ci.com/PavelTsvetanov/sort-system)
+[![Build Status](https://app.travis-ci.com/PavelTsvetanov/sort-system.svg?branch=main)](https://app.travis-ci.com/PavelTsvetanov/sort-system)
 
 This project is a version of the [SORT system](https://www.youtube.com/watch?v=BQDliV7w7_8), built during the course "Go to Production" by Ocado
 
